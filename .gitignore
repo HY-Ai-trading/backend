@@ -1,0 +1,33 @@
+# 환경변수 / 인증정보
+.env
+.env.*
+*.key
+*.pem
+*.cert
+
+# DB
+*.db
+*.db-shm
+*.db-wal
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+.venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# 로그
+*.log
+logs/
+
+# 테스트 / 임시
+signals/
+*.sh
+test_*.py

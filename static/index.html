@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OpenClaw 대시보드</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0d1117; --card: #161b22; --border: #30363d;
+    --text: #e6edf3; --muted: #7d8590;
+    --green: #3fb950; --red: #f85149; --blue: #58a6ff;
+    --yellow: #d29922;
+  }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; font-size: 14px; min-height: 100vh; }
+  header { display: flex; align-items: center; justify-content: space-between; padding: 16px 24px; border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 18px; font-weight: 600; color: var(--blue); letter-spacing: -0.3px; }
+  #last-updated { color: var(--muted); font-size: 12px; }
+  #refresh-btn { background: var(--card); border: 1px solid var(--border); color: var(--text); padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  #refresh-btn:hover { border-color: var(--blue); color: var(--blue); }
+  main { padding: 20px 24px; max-width: 1400px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
+
+  /* 상단 카드 */
+  .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; }
+  .card .label { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+  .card .value { font-size: 22px; font-weight: 700; letter-spacing: -0.5px; }
+  .card .sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .pos { color: var(--green); }
+  .neg { color: var(--red); }
+  .neu { color: var(--text); }
+
+  /* 섹션 */
+  .row { display: grid; gap: 12px; }
+  .row-2 { grid-template-columns: 1fr 1fr; }
+  .row-3 { grid-template-columns: 2fr 1fr; }
+  section { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; }
+  section h2 { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 14px; }
+
+  /* 테이블 */
+  table { width: 100%; border-collapse: collapse; }
+  th { color: var(--muted); font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; padding: 0 0 10px 0; text-align: right; border-bottom: 1px solid var(--border); }
+  th:first-child, td:first-child { text-align: left; }
+  td { padding: 10px 0; border-bottom: 1px solid #1c2128; font-size: 13px; text-align: right; }
+  tr:last-child td { border-bottom: none; }
+  .stock-name { font-weight: 600; color: var(--text); }
+  .stock-code { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  .badge-buy { background: rgba(63,185,80,0.15); color: var(--green); }
+  .badge-sell { background: rgba(248,81,73,0.15); color: var(--red); }
+
+  /* 차트 */
+  .chart-wrap { position: relative; height: 220px; }
+  .empty { color: var(--muted); text-align: center; padding: 40px 0; font-size: 13px; }
+  #error-banner { display: none; background: rgba(248,81,73,0.1); border: 1px solid var(--red); color: var(--red); padding: 10px 16px; border-radius: 8px; font-size: 13px; }
+  @media (max-width: 900px) {
+    .cards { grid-template-columns: repeat(2, 1fr); }
+    .row-2, .row-3 { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>⚡ OpenClaw</h1>
+  <div style="display:flex;align-items:center;gap:12px;">
+    <span id="last-updated">-</span>
+    <button id="refresh-btn" onclick="loadAll()">새로고침</button>
+  </div>
+</header>
+<main>
+  <div id="error-banner"></div>
+
+  <!-- 상단 요약 카드 -->
+  <div class="cards">
+    <div class="card">
+      <div class="label">예수금 (현금)</div>
+      <div class="value neu" id="c-cash">-</div>
+      <div class="sub">주문 가능 금액</div>
+    </div>
+    <div class="card">
+      <div class="label">총 평가금액</div>
+      <div class="value neu" id="c-eval">-</div>
+      <div class="sub" id="c-cost">-</div>
+    </div>
+    <div class="card">
+      <div class="label">평가손익</div>
+      <div class="value" id="c-profit">-</div>
+      <div class="sub" id="c-rate">-</div>
+    </div>
+    <div class="card">
+      <div class="label">월 실현손익 (30일)</div>
+      <div class="value" id="c-monthly">-</div>
+      <div class="sub" id="c-monthly-sub">최근 30일</div>
+    </div>
+  </div>
+
+  <!-- 보유종목 + 오늘 거래 -->
+  <div class="row row-3">
+    <section>
+      <h2>보유종목</h2>
+      <table id="holdings-table">
+        <thead>
+          <tr>
+            <th>종목</th>
+            <th>수량</th>
+            <th>평균단가</th>
+            <th>현재가</th>
+            <th>평가금액</th>
+            <th>손익</th>
+            <th>수익률</th>
+          </tr>
+        </thead>
+        <tbody id="holdings-body">
+          <tr><td colspan="7" class="empty">로딩 중...</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>오늘 체결 내역</h2>
+      <table id="trades-table">
+        <thead>
+          <tr>
+            <th>시간</th>
+            <th>종목</th>
+            <th>구분</th>
+            <th>체결가</th>
+            <th>수량</th>
+          </tr>
+        </thead>
+        <tbody id="trades-body">
+          <tr><td colspan="5" class="empty">로딩 중...</td></tr>
+        </tbody>
+      </table>
+    </section>
+  </div>
+
+  <!-- 월 수익 차트 -->
+  <section>
+    <h2>월 수익 추이 (30일)</h2>
+    <div class="chart-wrap">
+      <canvas id="pnl-chart"></canvas>
+    </div>
+  </section>
+</main>
+
+<script>
+const fmt = (n) => Number(n).toLocaleString('ko-KR') + '원';
+const fmtPct = (n) => (n >= 0 ? '+' : '') + Number(n).toFixed(2) + '%';
+const colorCls = (n) => n > 0 ? 'pos' : n < 0 ? 'neg' : 'neu';
+const fmtTime = (s) => s ? `${s.slice(0,2)}:${s.slice(2,4)}:${s.slice(4,6)}` : '-';
+
+let chart = null;
+
+async function api(path) {
+  const r = await fetch(path);
+  if (!r.ok) throw new Error(`${path} → ${r.status}`);
+  return r.json();
+}
+
+function showError(msg) {
+  const b = document.getElementById('error-banner');
+  b.textContent = '⚠ ' + msg;
+  b.style.display = 'block';
+}
+
+function renderAccount(data) {
+  const set = (id, val, cls) => {
+    const el = document.getElementById(id);
+    el.textContent = val;
+    if (cls) el.className = `value ${cls}`;
+  };
+
+  set('c-cash', fmt(data.cash), 'neu');
+  set('c-eval', fmt(data.total_eval), 'neu');
+  document.getElementById('c-cost').textContent = '매입 ' + fmt(data.total_cost);
+
+  const profit = data.total_profit;
+  set('c-profit', (profit >= 0 ? '+' : '') + fmt(profit), colorCls(profit));
+  document.getElementById('c-rate').textContent = fmtPct(data.profit_rate);
+
+  const tbody = document.getElementById('holdings-body');
+  if (!data.holdings || data.holdings.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty">보유 종목 없음</td></tr>';
+    return;
+  }
+  tbody.innerHTML = data.holdings.map(h => {
+    const pc = colorCls(h.profit);
+    return `<tr>
+      <td><div class="stock-name">${h.stock_name}</div><div class="stock-code">${h.stock_code}</div></td>
+      <td>${Number(h.quantity).toLocaleString()}주</td>
+      <td>${Number(h.avg_price).toLocaleString()}</td>
+      <td>${Number(h.current_price).toLocaleString()}</td>
+      <td>${Number(h.eval_amount).toLocaleString()}</td>
+      <td class="${pc}">${(h.profit >= 0 ? '+' : '') + Number(h.profit).toLocaleString()}</td>
+      <td class="${pc}">${fmtPct(h.profit_rate)}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderTrades(data) {
+  const tbody = document.getElementById('trades-body');
+  const list = data.cntr || [];
+  if (list.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" class="empty">오늘 체결 내역 없음</td></tr>';
+    return;
+  }
+  tbody.innerHTML = list.map(t => {
+    const isBuy = t.io_tp_nm && t.io_tp_nm.includes('매수');
+    return `<tr>
+      <td>${fmtTime(t.ord_tm)}</td>
+      <td>${t.stk_nm || '-'}</td>
+      <td><span class="badge ${isBuy ? 'badge-buy' : 'badge-sell'}">${isBuy ? '매수' : '매도'}</span></td>
+      <td>${Number(t.cntr_pric).toLocaleString()}</td>
+      <td>${Number(t.cntr_qty).toLocaleString()}주</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderChart(data) {
+  const labels = data.map(d => d.date);
+  const values = data.map(d => d.cumulative);
+
+  // 월 실현손익 카드
+  const monthly = data.reduce((s, d) => s + (d.daily_pnl || 0), 0);
+  const el = document.getElementById('c-monthly');
+  el.textContent = (monthly >= 0 ? '+' : '') + fmt(monthly);
+  el.className = `value ${colorCls(monthly)}`;
+
+  const ctx = document.getElementById('pnl-chart').getContext('2d');
+  if (chart) chart.destroy();
+
+  if (labels.length === 0) {
+    ctx.canvas.parentElement.innerHTML = '<div class="empty">거래 이력 없음 (DB에 데이터가 쌓이면 표시됩니다)</div>';
+    return;
+  }
+
+  const positive = values[values.length - 1] >= 0;
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label: '누적 손익',
+        data: values,
+        borderColor: positive ? '#3fb950' : '#f85149',
+        backgroundColor: positive ? 'rgba(63,185,80,0.08)' : 'rgba(248,81,73,0.08)',
+        borderWidth: 2,
+        fill: true,
+        tension: 0.3,
+        pointRadius: 3,
+        pointHoverRadius: 5,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => (ctx.raw >= 0 ? '+' : '') + ctx.raw.toLocaleString() + '원'
+          }
+        }
+      },
+      scales: {
+        x: { grid: { color: '#1c2128' }, ticks: { color: '#7d8590', maxTicksLimit: 8 } },
+        y: {
+          grid: { color: '#1c2128' }, ticks: {
+            color: '#7d8590',
+            callback: v => (v >= 0 ? '+' : '') + v.toLocaleString()
+          }
+        }
+      }
+    }
+  });
+}
+
+async function loadAll() {
+  document.getElementById('error-banner').style.display = 'none';
+  try {
+    // 계좌 + 보유종목
+    const account = await api('/kiwoom/account');
+    if (account.error) throw new Error(account.error);
+    renderAccount(account);
+  } catch (e) {
+    showError('계좌 조회 실패: ' + e.message);
+  }
+
+  try {
+    // 오늘 체결
+    const trades = await api('/kiwoom/orders/filled');
+    renderTrades(trades);
+  } catch (e) {
+    document.getElementById('trades-body').innerHTML =
+      '<tr><td colspan="5" class="empty">조회 실패</td></tr>';
+  }
+
+  try {
+    // 월 수익 차트
+    const pnl = await api('/dashboard/pnl-chart?days=30');
+    renderChart(pnl);
+  } catch (e) {
+    document.getElementById('c-monthly').textContent = '-';
+  }
+
+  document.getElementById('last-updated').textContent =
+    '업데이트: ' + new Date().toLocaleTimeString('ko-KR');
+}
+
+// 최초 로드 + 60초마다 자동 갱신
+loadAll();
+setInterval(loadAll, 60000);
+</script>
+</body>
+</html>
