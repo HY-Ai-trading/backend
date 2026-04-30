@@ -135,6 +135,61 @@ async def get_account_status(db: AsyncSession = Depends(get_db), _=Depends(requi
     }
 
 
+@router.get("/portfolio")
+async def get_portfolio(days: int = 30, db: AsyncSession = Depends(get_db), _=Depends(require_session)):
+    """최근 N일 매수 종목별 비중 + 실현손익"""
+    start = (date.today() - timedelta(days=days)).isoformat()
+
+    buy_res = await db.execute(
+        select(
+            TradeRecord.stock_code,
+            TradeRecord.stock_name,
+            func.sum(TradeRecord.amount).label("total_amount"),
+            func.sum(TradeRecord.quantity).label("total_qty"),
+            func.count(TradeRecord.id).label("trade_count"),
+        )
+        .where(
+            TradeRecord.status == "DONE",
+            TradeRecord.action == "BUY",
+            func.date(TradeRecord.created_at) >= start,
+        )
+        .group_by(TradeRecord.stock_code, TradeRecord.stock_name)
+        .order_by(func.sum(TradeRecord.amount).desc())
+    )
+    buy_rows = buy_res.all()
+
+    sell_res = await db.execute(
+        select(
+            TradeRecord.stock_code,
+            func.sum(TradeRecord.profit).label("realized_pnl"),
+            func.count(TradeRecord.id).label("sell_count"),
+        )
+        .where(
+            TradeRecord.status == "DONE",
+            TradeRecord.action == "SELL",
+            func.date(TradeRecord.created_at) >= start,
+        )
+        .group_by(TradeRecord.stock_code)
+    )
+    sell_map = {r.stock_code: {"realized_pnl": r.realized_pnl or 0, "sell_count": r.sell_count}
+                for r in sell_res.all()}
+
+    total = sum(r.total_amount or 0 for r in buy_rows) or 1
+    return [
+        {
+            "stock_code":    r.stock_code,
+            "stock_name":    r.stock_name,
+            "total_amount":  r.total_amount or 0,
+            "total_qty":     r.total_qty or 0,
+            "trade_count":   r.trade_count,
+            "percentage":    round((r.total_amount or 0) / total * 100, 1),
+            "realized_pnl":  sell_map.get(r.stock_code, {}).get("realized_pnl", 0),
+            "sell_count":    sell_map.get(r.stock_code, {}).get("sell_count", 0),
+        }
+        for r in buy_rows
+    ]
+
+
 @router.get("/positions")
 async def get_positions(db: AsyncSession = Depends(get_db), _=Depends(require_session)):
     """보유 포지션 (DB 기반 순매수 계산)"""

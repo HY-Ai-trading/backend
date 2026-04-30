@@ -58,21 +58,34 @@ async def _auto_sync_order(ord_no: str, stk_cd: str):
                     record.stock_name = stk_nm
 
                 if action == "SELL":
-                    buy_res = await db.execute(
+                    # 이동평균법으로 현재 포지션 avg_cost 계산
+                    # (현재 SELL 레코드는 아직 PENDING → DONE 전이므로 쿼리에 포함 안 됨)
+                    hist_res = await db.execute(
                         select(TradeRecord).where(
                             TradeRecord.stock_code == stk_cd,
-                            TradeRecord.action == "BUY",
                             TradeRecord.status == "DONE",
-                        )
+                        ).order_by(TradeRecord.created_at, TradeRecord.action.desc())
                     )
-                    buys = buy_res.scalars().all()
-                    if buys:
-                        total_cost = sum(b.price * b.quantity for b in buys)
-                        total_qty  = sum(b.quantity for b in buys)
-                        avg_buy    = total_cost / total_qty if total_qty else cntr_pric
-                        ratio      = min(cntr_qty / total_qty, 1.0) if total_qty else 1.0
-                        buy_cmsn   = int(sum(b.commission for b in buys) * ratio)
-                        record.profit = int((cntr_pric - avg_buy) * cntr_qty) - cmsn - tax - buy_cmsn
+                    hist = hist_res.scalars().all()
+
+                    inv_qty = 0; inv_cost = 0.0; inv_cmsn = 0.0
+                    for tr in hist:
+                        if tr.action == "BUY":
+                            total     = inv_cost * inv_qty + tr.price * tr.quantity
+                            inv_qty  += tr.quantity
+                            inv_cost  = total / inv_qty if inv_qty else tr.price
+                            inv_cmsn += tr.commission
+                        elif tr.action == "SELL":
+                            r = min(tr.quantity / inv_qty, 1.0) if inv_qty > 0 else 0
+                            inv_qty   = max(0, inv_qty - tr.quantity)
+                            inv_cmsn  = max(0.0, inv_cmsn * (1 - r))
+                            if inv_qty == 0:
+                                inv_cost = 0.0; inv_cmsn = 0.0
+
+                    avg_buy      = inv_cost if inv_qty > 0 else cntr_pric
+                    ratio        = min(cntr_qty / inv_qty, 1.0) if inv_qty > 0 else 1.0
+                    buy_cmsn_cut = int(inv_cmsn * ratio)
+                    record.profit = int((cntr_pric - avg_buy) * cntr_qty) - cmsn - tax - buy_cmsn_cut
 
                 await db.commit()
                 print(f"✅ 자동 체결 확인: {ord_no} {action} {stk_cd} {cntr_pric:,}원 profit={record.profit:+.0f}")
