@@ -393,12 +393,12 @@ async def websocket_realtime(
             await websocket.send_json({"event": "connected", "stocks": stock_list})
 
             # 2. 실시간 종목 등록
-            # 0A=주식현재가, 0B=주식체결, 0C=주식호가잔량
+            # 0A=주식현재가, 0B=주식체결, 0g=주식종목정보(현재가·등락)
             await kw.send(json.dumps({
                 "trnm": "REG",
                 "grp_no": "1",
                 "refresh": "1",
-                "data": [{"item": stock_list, "type": ["0A", "0B"]}],
+                "data": [{"item": stock_list, "type": ["0A", "0B", "0g"]}],
             }))
 
             async def from_kiwoom():
@@ -422,7 +422,7 @@ async def websocket_realtime(
                                 "trnm": "REG",
                                 "grp_no": "1",
                                 "refresh": "0",
-                                "data": [{"item": new_stocks, "type": ["0A", "0B"]}],
+                                "data": [{"item": new_stocks, "type": ["0A", "0B", "0g"]}],
                             }))
                     except Exception:
                         break

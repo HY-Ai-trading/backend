@@ -43,13 +43,11 @@ async def get_summary(db: AsyncSession = Depends(get_db), _=Depends(require_sess
     }
 
 @router.get("/trades")
-async def get_trades(limit: int = 100, db: AsyncSession = Depends(get_db), _=Depends(require_session)):
-    result = await db.execute(
-        select(TradeRecord)
-        .where(TradeRecord.order_id.isnot(None))
-        .order_by(TradeRecord.created_at.desc())
-        .limit(limit)
-    )
+async def get_trades(limit: int = 100, stock_code: str = None, db: AsyncSession = Depends(get_db), _=Depends(require_session)):
+    q = select(TradeRecord).where(TradeRecord.order_id.isnot(None))
+    if stock_code:
+        q = q.where(TradeRecord.stock_code == stock_code)
+    result = await db.execute(q.order_by(TradeRecord.created_at.desc()).limit(limit))
     return [
         {
             "id": r.id, "created_at": r.created_at.isoformat(),
