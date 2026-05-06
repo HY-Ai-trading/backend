@@ -70,6 +70,7 @@ async def get_account(_=Depends(require_session)):
             "quantity": n(h["rmnd_qty"]),
             "avg_price": n(h["pur_pric"]),
             "current_price": n(h["cur_prc"]),
+            "prev_close": n(h["pred_close_pric"]),
             "eval_amount": n(h["evlt_amt"]),
             "profit": n(h["evltv_prft"]),
             "profit_rate": f(h["prft_rt"]),
