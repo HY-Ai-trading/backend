@@ -486,6 +486,47 @@ async def get_daily_ohlcv(token: str, stock_code: str, count: int = 30) -> list[
     return result
 
 
+async def get_minute_ohlcv(token: str, stock_code: str, tic_scope: str = "5", count: int = 100) -> list[dict]:
+    """주식분봉차트 조회 (ka10080) → 최근 count개 분봉 OHLCV 리스트 반환
+    tic_scope: 1=1분, 3=3분, 5=5분, 10=10분, 15=15분, 30=30분, 45=45분, 60=60분
+    각 항목: {"datetime": "20260517 093000", "open": int, "high": int, "low": int, "close": int, "volume": int}
+    최신 데이터가 index 0
+    """
+    from datetime import date as _date
+    base_dt = _date.today().strftime("%Y%m%d")
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(
+                f"{KIWOOM_API_URL}/api/dostk/chart",
+                headers=_kiwoom_headers(token, "ka10080"),
+                json={"stk_cd": stock_code, "tic_scope": tic_scope, "upd_stkpc_tp": "1", "base_dt": base_dt},
+                timeout=10,
+            )
+            data = response.json()
+        except Exception:
+            return []
+
+    if data.get("return_code") != 0:
+        return []
+
+    rows = data.get("stk_min_pole_chart_qry", [])
+    result = []
+    for r in rows[:count]:
+        try:
+            cntr_tm = r.get("cntr_tm", "")  # "20260515153000" = YYYYMMDDHHMMSS
+            result.append({
+                "datetime": cntr_tm,
+                "open":     _parse_price(r.get("open_pric", "0")),
+                "high":     _parse_price(r.get("high_pric", "0")),
+                "low":      _parse_price(r.get("low_pric", "0")),
+                "close":    _parse_price(r.get("cur_prc", "0")),
+                "volume":   int(str(r.get("trde_qty", "0")).replace(",", "") or 0),
+            })
+        except Exception:
+            continue
+    return result
+
+
 def _calc_rsi(closes: list[float], period: int = 14) -> float | None:
     if len(closes) < period + 1:
         return None

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
-from database import get_db, TradeRecord, DailySummary, SignalRecord
+from database import get_db, TradeRecord, DailySummary, SignalRecord, Setting
 from datetime import datetime, date, timedelta
 from auth import require_session
 import kiwoom_bridge
@@ -173,7 +173,7 @@ async def get_portfolio(days: int = 30, db: AsyncSession = Depends(get_db), _=De
                 for r in sell_res.all()}
 
     total = sum(r.total_amount or 0 for r in buy_rows) or 1
-    return [
+    rows = [
         {
             "stock_code":    r.stock_code,
             "stock_name":    r.stock_name,
@@ -186,6 +186,27 @@ async def get_portfolio(days: int = 30, db: AsyncSession = Depends(get_db), _=De
         }
         for r in buy_rows
     ]
+    return sorted(rows, key=lambda x: x["realized_pnl"], reverse=True)
+
+
+@router.get("/principal")
+async def get_principal(db: AsyncSession = Depends(get_db), _=Depends(require_session)):
+    """투자 원금 조회"""
+    row = await db.get(Setting, "principal")
+    return {"principal": int(row.value) if row else 0}
+
+
+@router.post("/principal")
+async def set_principal(body: dict, db: AsyncSession = Depends(get_db), _=Depends(require_session)):
+    """투자 원금 저장"""
+    value = int(body.get("principal", 0))
+    row = await db.get(Setting, "principal")
+    if row:
+        row.value = str(value)
+    else:
+        db.add(Setting(key="principal", value=str(value)))
+    await db.commit()
+    return {"principal": value}
 
 
 @router.get("/positions")

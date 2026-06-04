@@ -45,6 +45,12 @@ class SignalRecord(Base):
     rejected     = Column(Boolean, default=False)
     reject_reason= Column(Text)
 
+# 설정값 key-value 저장
+class Setting(Base):
+    __tablename__ = "settings"
+    key   = Column(String(50), primary_key=True)
+    value = Column(String(200), default="")
+
 # 일별 손익 요약
 class DailySummary(Base):
     __tablename__ = "daily_summary"

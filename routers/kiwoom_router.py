@@ -78,16 +78,18 @@ async def get_account(_=Depends(require_session)):
         for h in raw.get("acnt_evlt_remn_indv_tot", [])
         if n(h["rmnd_qty"]) > 0
     ]
-    total_asset = n(raw["prsm_dpst_aset_amt"])
-    total_eval  = n(raw["tot_evlt_amt"])
+    total_asset  = n(raw["prsm_dpst_aset_amt"])
+    total_eval   = n(raw["tot_evlt_amt"])
+    unrealized   = n(raw["tot_evlt_pl"])   # 키움 미실현손익 (수수료 반영)
     return {
-        "cash": total_asset - total_eval,   # 순수 예수금 (현금)
-        "total_asset": total_asset,          # 총 자산 (현금 + 보유종목)
+        "cash": total_asset - total_eval,
+        "total_asset": total_asset,
         "total_cost": n(raw["tot_pur_amt"]),
         "total_eval": total_eval,
-        "total_profit": n(raw["tot_evlt_pl"]),
+        "total_profit": unrealized,
         "profit_rate": f(raw["tot_prft_rt"]),
         "holdings": holdings,
+        "unrealized_pnl": unrealized,
     }
 
 
@@ -298,6 +300,21 @@ async def get_indicators(stock_code: str, _=Depends(require_session)):
         return {"error": "일봉 데이터 없음", "code": stock_code}
     indicators = kiwoom_bridge.calc_indicators(ohlcv)
     return {"code": stock_code, **indicators}
+
+
+@router.get("/chart/minute/{stock_code}")
+async def get_minute_chart(
+    stock_code: str,
+    tic_scope: str = Query(default="5", description="1=1분, 3=3분, 5=5분, 10=10분, 15=15분, 30=30분, 45=45분, 60=60분"),
+    count: int = Query(default=100, description="조회 개수 (최대 900)"),
+    _=Depends(require_session),
+):
+    """주식 분봉 차트 (ka10080)"""
+    token = await _get_token()
+    if not token:
+        return {"error": "토큰 획득 실패"}
+    data = await kiwoom_bridge.get_minute_ohlcv(token, stock_code, tic_scope=tic_scope, count=count)
+    return {"stock_code": stock_code, "tic_scope": tic_scope, "candles": data}
 
 
 @router.get("/quote/{stock_code}")
