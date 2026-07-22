@@ -51,6 +51,19 @@ class Setting(Base):
     key   = Column(String(50), primary_key=True)
     value = Column(String(200), default="")
 
+# 매도 잠금 종목
+class LockedStock(Base):
+    __tablename__ = "locked_stocks"
+    stock_code = Column(String(10), primary_key=True)
+    locked_at  = Column(DateTime, default=datetime.now)
+
+# 월별 총자산 스냅샷 (매월 1일 기준)
+class MonthlyAsset(Base):
+    __tablename__ = "monthly_assets"
+    month        = Column(String(7), primary_key=True)  # YYYY-MM
+    total_asset  = Column(Integer, default=0)
+    created_at   = Column(DateTime, default=datetime.now)
+
 # 일별 손익 요약
 class DailySummary(Base):
     __tablename__ = "daily_summary"

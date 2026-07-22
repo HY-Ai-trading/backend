@@ -202,11 +202,22 @@ async def signal_callback(
     return {"ok": True}
 
 @router.get("/list")
-async def list_signals(limit: int = 50, db: AsyncSession = Depends(get_db), _=Depends(require_session)):
+async def list_signals(limit: int = 50, month: str = None, db: AsyncSession = Depends(get_db), _=Depends(require_session)):
     """신호 목록 (로그인 필요)"""
     from database import TradeRecord
+    from sqlalchemy import func
+    q = select(SignalRecord)
+    if month:
+        import calendar as _cal
+        y, m = map(int, month.split("-"))
+        start = f"{month}-01"
+        end   = f"{month}-{_cal.monthrange(y, m)[1]:02d}"
+        q = q.where(
+            func.date(SignalRecord.created_at) >= start,
+            func.date(SignalRecord.created_at) <= end,
+        )
     signals = (await db.execute(
-        select(SignalRecord).order_by(SignalRecord.created_at.desc()).limit(limit)
+        q.order_by(SignalRecord.created_at.desc()).limit(limit)
     )).scalars().all()
 
     # signal_id → 체결가 매핑

@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
 import kiwoom_bridge
-from database import get_db, TradeRecord
+from database import get_db, TradeRecord, LockedStock
 from auth import require_session
 from dotenv import load_dotenv
 
@@ -43,6 +43,13 @@ class ModifyRequest(BaseModel):
     quantity: str   # 정정수량
     price: str      # 정정단가
     cond_price: str = ""  # 정정조건단가 (조건부지정가일 때만)
+
+
+class SellRequest(BaseModel):
+    stock_code: str
+    stock_name: str = ""
+    quantity: int
+    order_type: str = "MARKET"  # MARKET=시장가(즉시체결), LIMIT=현재 호가 기준 지정가
 
 
 async def _get_token():
@@ -287,6 +294,57 @@ async def recalc_profit(db: AsyncSession = Depends(get_db), _=Depends(require_se
 
     await db.commit()
     return {"recalculated": fixed}
+
+
+@router.post("/order/sell")
+async def sell_holding(req: SellRequest, db: AsyncSession = Depends(get_db), _=Depends(require_session)):
+    """대시보드에서 보유 종목 직접 매도"""
+    from models import TradingSignal
+    from routers.signal_router import _auto_sync_order
+    import asyncio
+
+    if req.quantity <= 0:
+        return {"success": False, "message": "수량은 1 이상이어야 합니다"}
+
+    signal = TradingSignal(
+        stock_code=req.stock_code,
+        stock_name=req.stock_name or req.stock_code,
+        action="SELL",
+        confidence=1.0,
+        reason="대시보드 수동 매도",
+        quantity=req.quantity,
+        order_type=req.order_type,
+    )
+    result = await kiwoom_bridge.send_order(signal, db)
+    if result["success"] and result.get("order_id"):
+        asyncio.create_task(_auto_sync_order(result["order_id"], req.stock_code))
+    return result
+
+
+@router.get("/locked")
+async def get_locked_stocks(db: AsyncSession = Depends(get_db), _=Depends(require_session)):
+    """매도 잠금된 종목 코드 목록"""
+    result = await db.execute(select(LockedStock))
+    return [r.stock_code for r in result.scalars().all()]
+
+
+@router.post("/lock/{stock_code}")
+async def lock_stock(stock_code: str, db: AsyncSession = Depends(get_db), _=Depends(require_session)):
+    """종목 매도 잠금"""
+    if not await db.get(LockedStock, stock_code):
+        db.add(LockedStock(stock_code=stock_code))
+        await db.commit()
+    return {"success": True, "stock_code": stock_code, "locked": True}
+
+
+@router.post("/unlock/{stock_code}")
+async def unlock_stock(stock_code: str, db: AsyncSession = Depends(get_db), _=Depends(require_session)):
+    """종목 매도 잠금 해제"""
+    row = await db.get(LockedStock, stock_code)
+    if row:
+        await db.delete(row)
+        await db.commit()
+    return {"success": True, "stock_code": stock_code, "locked": False}
 
 
 @router.get("/indicators/{stock_code}")

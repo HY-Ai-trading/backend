@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
-from database import get_db, TradeRecord, DailySummary, SignalRecord, Setting
+from database import get_db, TradeRecord, DailySummary, SignalRecord, Setting, MonthlyAsset
 from datetime import datetime, date, timedelta
 from auth import require_session
 import kiwoom_bridge
@@ -43,10 +43,19 @@ async def get_summary(db: AsyncSession = Depends(get_db), _=Depends(require_sess
     }
 
 @router.get("/trades")
-async def get_trades(limit: int = 100, stock_code: str = None, db: AsyncSession = Depends(get_db), _=Depends(require_session)):
+async def get_trades(limit: int = 100, stock_code: str = None, month: str = None, db: AsyncSession = Depends(get_db), _=Depends(require_session)):
     q = select(TradeRecord).where(TradeRecord.order_id.isnot(None))
     if stock_code:
         q = q.where(TradeRecord.stock_code == stock_code)
+    if month:
+        import calendar as _cal
+        y, m = map(int, month.split("-"))
+        start = f"{month}-01"
+        end   = f"{month}-{_cal.monthrange(y, m)[1]:02d}"
+        q = q.where(
+            func.date(TradeRecord.created_at) >= start,
+            func.date(TradeRecord.created_at) <= end,
+        )
     result = await db.execute(q.order_by(TradeRecord.created_at.desc()).limit(limit))
     return [
         {
@@ -61,8 +70,25 @@ async def get_trades(limit: int = 100, stock_code: str = None, db: AsyncSession 
     ]
 
 @router.get("/pnl-chart")
-async def get_pnl_chart(days: int = 30, db: AsyncSession = Depends(get_db), _=Depends(require_session)):
-    start = (date.today() - timedelta(days=days)).isoformat()
+async def get_pnl_chart(days: int = 30, month: str = None, db: AsyncSession = Depends(get_db), _=Depends(require_session)):
+    if month:
+        import calendar as _cal
+        y, m = map(int, month.split("-"))
+        start = f"{month}-01"
+        end   = f"{month}-{_cal.monthrange(y, m)[1]:02d}"
+        # 이전 달까지의 전체 누적손익을 시작값으로 사용 (월별 보기에서도 전체 누적 추이 확인)
+        prior = await db.execute(
+            select(func.sum(TradeRecord.profit)).where(
+                TradeRecord.status == "DONE",
+                TradeRecord.action == "SELL",
+                func.date(TradeRecord.created_at) < start,
+            )
+        )
+        cumulative = prior.scalar() or 0
+    else:
+        start = (date.today() - timedelta(days=days)).isoformat()
+        end   = date.today().isoformat()
+        cumulative = 0
     result = await db.execute(
         select(
             func.date(TradeRecord.created_at).label("date"),
@@ -73,11 +99,11 @@ async def get_pnl_chart(days: int = 30, db: AsyncSession = Depends(get_db), _=De
             TradeRecord.status == "DONE",
             TradeRecord.action == "SELL",
             func.date(TradeRecord.created_at) >= start,
+            func.date(TradeRecord.created_at) <= end,
         )
         .group_by(func.date(TradeRecord.created_at))
         .order_by(func.date(TradeRecord.created_at))
     )
-    cumulative = 0
     data = []
     for row in result.all():
         daily = row.daily_pnl or 0
@@ -89,6 +115,85 @@ async def get_pnl_chart(days: int = 30, db: AsyncSession = Depends(get_db), _=De
             "trade_count": row.trade_count,
         })
     return data
+
+DEFAULT_MONTHLY_BASELINE = 100_000  # 월별 총자산 스냅샷이 없는 과거 달의 기본 원금
+
+@router.get("/pnl-by-month")
+async def get_pnl_by_month(months: int = 12, db: AsyncSession = Depends(get_db), _=Depends(require_session)):
+    """최근 N개월 월별 실현손익 합계 + 월초 총자산 대비 수익률"""
+    result = await db.execute(
+        select(
+            func.strftime("%Y-%m", TradeRecord.created_at).label("month"),
+            func.sum(TradeRecord.profit).label("pnl"),
+            func.count(TradeRecord.id).label("trade_count"),
+        )
+        .where(
+            TradeRecord.status == "DONE",
+            TradeRecord.action == "SELL",
+        )
+        .group_by(func.strftime("%Y-%m", TradeRecord.created_at))
+        .order_by(func.strftime("%Y-%m", TradeRecord.created_at).desc())
+        .limit(months)
+    )
+    rows = result.all()
+    current_month = date.today().strftime("%Y-%m")
+
+    out = []
+    for r in rows:
+        pnl = r.pnl or 0
+        snapshot = await db.get(MonthlyAsset, r.month)
+        baseline = snapshot.total_asset if snapshot else None
+
+        if baseline is None and r.month == current_month:
+            total = await kiwoom_bridge.get_total_asset()
+            if total:
+                db.add(MonthlyAsset(month=r.month, total_asset=total))
+                await db.commit()
+                baseline = total
+
+        if baseline is None:
+            baseline = DEFAULT_MONTHLY_BASELINE
+
+        out.append({
+            "month": r.month,
+            "pnl": pnl,
+            "trade_count": r.trade_count,
+            "pct": round(pnl / baseline * 100, 2),
+        })
+    return list(reversed(out))
+
+
+@router.get("/fees")
+async def get_fees(month: str = None, db: AsyncSession = Depends(get_db), _=Depends(require_session)):
+    """수수료+세금 합계 (월별 조회 가능, month 미지정 시 전체)"""
+    q = select(
+        TradeRecord.action,
+        func.sum(TradeRecord.commission).label("fee"),
+        func.count(TradeRecord.id).label("cnt"),
+    ).where(TradeRecord.status == "DONE")
+    if month:
+        import calendar as _cal
+        y, m = map(int, month.split("-"))
+        start = f"{month}-01"
+        end   = f"{month}-{_cal.monthrange(y, m)[1]:02d}"
+        q = q.where(
+            func.date(TradeRecord.created_at) >= start,
+            func.date(TradeRecord.created_at) <= end,
+        )
+    result = await db.execute(q.group_by(TradeRecord.action))
+    rows = {r.action: {"fee": r.fee or 0, "count": r.cnt} for r in result.all()}
+    buy  = rows.get("BUY",  {"fee": 0, "count": 0})
+    sell = rows.get("SELL", {"fee": 0, "count": 0})
+    return {
+        "month":       month,
+        "total_fee":   buy["fee"] + sell["fee"],
+        "total_count": buy["count"] + sell["count"],
+        "buy_fee":     buy["fee"],
+        "buy_count":   buy["count"],
+        "sell_fee":    sell["fee"],
+        "sell_count":  sell["count"],
+    }
+
 
 @router.get("/account")
 async def get_account_status(db: AsyncSession = Depends(get_db), _=Depends(require_session)):
@@ -134,9 +239,16 @@ async def get_account_status(db: AsyncSession = Depends(get_db), _=Depends(requi
 
 
 @router.get("/portfolio")
-async def get_portfolio(days: int = 30, db: AsyncSession = Depends(get_db), _=Depends(require_session)):
-    """최근 N일 매수 종목별 비중 + 실현손익"""
-    start = (date.today() - timedelta(days=days)).isoformat()
+async def get_portfolio(days: int = 30, month: str = None, db: AsyncSession = Depends(get_db), _=Depends(require_session)):
+    """매수 종목별 비중 + 실현손익 (month 지정 시 해당 월, 아니면 최근 N일)"""
+    if month:
+        import calendar as _cal
+        y, m = map(int, month.split("-"))
+        start = f"{month}-01"
+        end   = f"{month}-{_cal.monthrange(y, m)[1]:02d}"
+    else:
+        start = (date.today() - timedelta(days=days)).isoformat()
+        end   = date.today().isoformat()
 
     buy_res = await db.execute(
         select(
@@ -150,6 +262,7 @@ async def get_portfolio(days: int = 30, db: AsyncSession = Depends(get_db), _=De
             TradeRecord.status == "DONE",
             TradeRecord.action == "BUY",
             func.date(TradeRecord.created_at) >= start,
+            func.date(TradeRecord.created_at) <= end,
         )
         .group_by(TradeRecord.stock_code, TradeRecord.stock_name)
         .order_by(func.sum(TradeRecord.amount).desc())
@@ -166,6 +279,7 @@ async def get_portfolio(days: int = 30, db: AsyncSession = Depends(get_db), _=De
             TradeRecord.status == "DONE",
             TradeRecord.action == "SELL",
             func.date(TradeRecord.created_at) >= start,
+            func.date(TradeRecord.created_at) <= end,
         )
         .group_by(TradeRecord.stock_code)
     )

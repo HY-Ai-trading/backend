@@ -6,12 +6,13 @@
 """
 
 import os
+import asyncio
 import httpx
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from database import TradeRecord, SignalRecord
+from database import TradeRecord, SignalRecord, LockedStock
 from models import TradingSignal
 from dotenv import load_dotenv
 
@@ -177,6 +178,149 @@ async def cancel_order(stock_code: str, orig_ord_no: str, cncl_qty: str = "0") -
             return {"success": False, "message": str(e)}
 
 
+async def auto_adjust_pending_buy_orders(db: AsyncSession) -> list[dict]:
+    """미체결 매수 지정가 주문 중 현재가가 내려갔으면 취소 후 현재가로 재주문.
+    장 시간(09:00~15:30 KST)에만 동작.
+    """
+    now = _now_kst()
+    market_open  = now.replace(hour=9,  minute=0,  second=0, microsecond=0)
+    market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    if not (market_open <= now <= market_close):
+        return []
+
+    token = await get_access_token()
+    if not token:
+        return []
+
+    raw = await get_unfilled_orders(token)
+    if raw.get("return_code") != 0:
+        return []
+
+    # 응답에서 주문 목록 찾기 (ord_no 가 있는 첫 번째 리스트)
+    orders: list[dict] = []
+    for val in raw.values():
+        if isinstance(val, list) and val and isinstance(val[0], dict) and "ord_no" in val[0]:
+            orders = val
+            break
+    if not orders:
+        for val in raw.values():
+            if isinstance(val, list) and val and isinstance(val[0], dict):
+                orders = val
+                break
+
+    if not orders:
+        return []
+
+    results = []
+    for order in orders:
+        # 매수(1)이고 지정가("보통"/"0")인 주문만
+        if str(order.get("buy_sell_tp", "")).strip() != "1":
+            continue
+        trde_tp_val = str(order.get("trde_tp", "")).strip()
+        if trde_tp_val not in ("보통", "0", "지정가"):
+            continue
+
+        ord_no  = str(order.get("ord_no",  "")).strip()
+        stk_cd  = str(order.get("stk_cd",  "")).strip()
+        stk_nm  = str(order.get("stk_nm",  "")).strip()
+        if not ord_no or not stk_cd:
+            continue
+
+        try:
+            ord_price = _parse_price(order.get("ord_uv", "0"))
+            ord_qty   = int(str(order.get("ord_qty",  "0")).replace(",", "").strip())
+            cntr_qty  = int(str(order.get("cntr_qty", "0")).replace(",", "").strip())
+        except (ValueError, TypeError):
+            continue
+
+        if ord_price == 0 or ord_qty == 0:
+            continue
+
+        remain_qty = ord_qty - cntr_qty
+        if remain_qty <= 0:
+            continue
+
+        # 현재 매도1호가 조회
+        prices  = await get_stock_quote_prices(token, stk_cd)
+        cur_ask = prices["ask"]
+        if cur_ask == 0:
+            continue
+
+        # 가격이 10원 이상 내려갔을 때만 조정
+        if cur_ask >= ord_price or (ord_price - cur_ask) < 10:
+            continue
+
+        print(f"📉 {stk_nm}({stk_cd}) 주문가 {ord_price:,}원 → 현재가 {cur_ask:,}원 (하락) → 취소 후 재주문")
+
+        # 기존 주문 취소
+        cancel_res = await cancel_order(stk_cd, ord_no)
+        if not cancel_res.get("success"):
+            print(f"⚠️  취소 실패: {cancel_res.get('message')}")
+            results.append({"action": "cancel_failed", "stk_cd": stk_cd, "ord_no": ord_no})
+            continue
+
+        await asyncio.sleep(0.5)  # 취소 반영 대기
+
+        # 현재 매도1호가로 재매수 주문
+        order_body = {
+            "dmst_stex_tp": "KRX",
+            "stk_cd":  stk_cd,
+            "ord_qty": str(remain_qty),
+            "ord_uv":  str(cur_ask),
+            "trde_tp": "0",
+            "cond_uv": "",
+        }
+        async with httpx.AsyncClient() as client:
+            try:
+                resp = await client.post(
+                    f"{KIWOOM_API_URL}/api/dostk/ordr",
+                    headers=_kiwoom_headers(token, "kt10000"),
+                    json=order_body,
+                    timeout=10,
+                )
+                buy_res = resp.json()
+            except Exception as e:
+                print(f"⚠️  재주문 실패: {e}")
+                results.append({"action": "rebuy_failed", "stk_cd": stk_cd})
+                continue
+
+        if buy_res.get("return_code") != 0:
+            print(f"⚠️  재주문 API 오류: {buy_res.get('return_msg')}")
+            results.append({"action": "rebuy_api_error", "stk_cd": stk_cd, "msg": buy_res.get("return_msg")})
+            continue
+
+        new_ord_no = buy_res.get("ord_no", "")
+        print(f"✅ {stk_nm} 재주문 완료: {ord_no} → {new_ord_no}, {cur_ask:,}원 × {remain_qty}주")
+
+        # DB: 기존 PENDING TradeRecord의 주문번호·가격 갱신
+        result = await db.execute(
+            select(TradeRecord).where(
+                TradeRecord.order_id == ord_no,
+                TradeRecord.status == "PENDING",
+            )
+        )
+        trade = result.scalar_one_or_none()
+        if trade:
+            trade.order_id = new_ord_no
+            trade.price    = cur_ask
+            trade.amount   = cur_ask * remain_qty
+            await db.commit()
+            print(f"✅ DB 업데이트: trade_id={trade.id}, {ord_no} → {new_ord_no}")
+
+        results.append({
+            "action":    "adjusted",
+            "stk_cd":   stk_cd,
+            "stk_nm":   stk_nm,
+            "old_ord_no": ord_no,
+            "new_ord_no": new_ord_no,
+            "old_price":  ord_price,
+            "new_price":  cur_ask,
+            "quantity":   remain_qty,
+        })
+
+    return results
+
+
 async def modify_order(
     stock_code: str,
     orig_ord_no: str,
@@ -221,6 +365,11 @@ async def modify_order(
 async def send_order(signal: TradingSignal, db: AsyncSession) -> dict:
     try:
         quantity = signal.quantity or 1
+
+        if signal.action == "SELL" and await db.get(LockedStock, signal.stock_code):
+            msg = f"{signal.stock_name or signal.stock_code}은 매도 잠금 상태입니다"
+            print(f"🔒 {msg}")
+            return {"success": False, "message": msg, "trade_id": None, "order_id": None}
 
         if not KIWOOM_APPKEY or not KIWOOM_ACCOUNT_NO:
             return {"success": False, "message": "API 인증정보 미설정", "trade_id": None, "order_id": None}
@@ -328,6 +477,20 @@ async def send_order(signal: TradingSignal, db: AsyncSession) -> dict:
         error_msg = f"주문 실패: {str(e)}"
         print(f"❌ {error_msg}")
         return {"success": False, "message": error_msg, "trade_id": None, "order_id": None}
+
+
+async def get_total_asset() -> int | None:
+    """현재 계좌 총자산(예수금+평가금액) 조회. 실패 시 None"""
+    token = await get_access_token()
+    if not token:
+        return None
+    raw = await get_account_holdings(token)
+    if raw.get("return_code") != 0:
+        return None
+    try:
+        return int(raw.get("prsm_dpst_aset_amt") or 0)
+    except (TypeError, ValueError):
+        return None
 
 
 async def get_account_holdings(token: str) -> dict:
